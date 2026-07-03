@@ -1,0 +1,19 @@
+:root {
+  --night: #0b0714;
+  --moon: #f2ead9;
+  --haze: #8f86a3;
+  --mono: ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--night);
+  color: var(--moon);
+  overflow: hidden;
+}
