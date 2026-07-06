@@ -9,16 +9,34 @@
   let showPanel = $state(false)
 
   async function begin() {
+    // silent looping <audio> promotes the iOS audio session to "playback",
+    // so sound survives the ringer/silent switch
+    const unlock = new Audio(
+      'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='
+    )
+    unlock.loop = true
+    unlock.setAttribute('playsinline', '')
+    unlock.play().catch(() => {})
     await engine.start()
     begun = true
   }
+
+  // mobile browsers suspend the AudioContext on tab-switch/screen-lock and
+  // (on iOS) never resume it themselves
+  function onVisible() {
+    if (!document.hidden) engine.resumeContext()
+  }
+  document.addEventListener('visibilitychange', onVisible)
 
   function toggle() {
     if (engine.running) engine.pause()
     else engine.resume()
   }
 
-  onDestroy(() => engine.dispose())
+  onDestroy(() => {
+    document.removeEventListener('visibilitychange', onVisible)
+    engine.dispose()
+  })
 </script>
 
 <main>
@@ -267,5 +285,48 @@
   select:focus-visible {
     outline: 1px solid var(--moon);
     outline-offset: 3px;
+  }
+
+  @media (max-width: 600px) {
+    footer {
+      flex-wrap: wrap;
+      justify-content: center;
+      row-gap: 0.7rem;
+      width: calc(100vw - 2rem);
+      border-radius: 1.2rem;
+      bottom: 1rem;
+    }
+
+    /* panel moves to top as a column — wrapped footer height is unpredictable */
+    .panel {
+      flex-direction: column;
+      align-items: stretch;
+      top: 1rem;
+      bottom: auto;
+      width: calc(100vw - 2rem);
+      border-radius: 1.2rem;
+    }
+
+    .panel label {
+      justify-content: space-between;
+    }
+
+    .panel input[type='range'] {
+      width: 55vw;
+    }
+
+    /* Apple 44px tap-target floor */
+    .transport {
+      min-height: 44px;
+      text-align: center;
+    }
+
+    input[type='range'] {
+      min-height: 32px;
+    }
+
+    select {
+      min-height: 36px;
+    }
   }
 </style>

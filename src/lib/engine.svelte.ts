@@ -227,6 +227,12 @@ export class Engine {
     this.running = false
   }
 
+  /** Kick a suspended/interrupted AudioContext — mobile tab-switch and iOS
+   * screen lock leave the context stalled and it never resumes itself. */
+  resumeContext(): void {
+    if (this.started && !this.disposed) void Tone.getContext().resume()
+  }
+
   resume(): void {
     if (!this.started || this.running || this.disposed) return
     // rebuild rather than restart — a pending scheduled stop can't kill a
