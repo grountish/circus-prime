@@ -8,15 +8,48 @@
   let begun = $state(false)
   let showPanel = $state(false)
 
-  async function begin() {
-    // silent looping <audio> promotes the iOS audio session to "playback",
-    // so sound survives the ringer/silent switch
-    const unlock = new Audio(
-      'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='
-    )
+  /** One second of 8 kHz 8-bit mono silence as a WAV blob. Must hold real
+   * samples — looping a zero-length clip makes the media pipeline restart it
+   * in a tight loop and pegs the tab. */
+  function silentWav(): string {
+    const samples = 8000
+    const view = new DataView(new ArrayBuffer(44 + samples))
+    const text = (at: number, s: string) => {
+      for (let i = 0; i < s.length; i++) view.setUint8(at + i, s.charCodeAt(i))
+    }
+    text(0, 'RIFF')
+    view.setUint32(4, 36 + samples, true)
+    text(8, 'WAVEfmt ')
+    view.setUint32(16, 16, true) // fmt chunk size
+    view.setUint16(20, 1, true) // PCM
+    view.setUint16(22, 1, true) // mono
+    view.setUint32(24, samples, true) // sample rate
+    view.setUint32(28, samples, true) // byte rate
+    view.setUint16(32, 1, true) // block align
+    view.setUint16(34, 8, true) // bits per sample
+    text(36, 'data')
+    view.setUint32(40, samples, true)
+    for (let i = 0; i < samples; i++) view.setUint8(44 + i, 128) // 8-bit silence is mid-scale
+    return URL.createObjectURL(new Blob([view], { type: 'audio/wav' }))
+  }
+
+  /** Promote the iOS audio session to "playback" so sound survives the
+   * ringer/silent switch. Safari 16.4+ has a real API for it; older iOS
+   * needs a silent looping <audio>. */
+  function unlockAudioSession() {
+    const session = (navigator as Navigator & { audioSession?: { type: string } }).audioSession
+    if (session) {
+      session.type = 'playback'
+      return
+    }
+    const unlock = new Audio(silentWav())
     unlock.loop = true
     unlock.setAttribute('playsinline', '')
     unlock.play().catch(() => {})
+  }
+
+  async function begin() {
+    unlockAudioSession()
     await engine.start()
     begun = true
   }
@@ -54,6 +87,15 @@
             {#each Tuning.SCALE_NAMES as name}
               <option value={name}>{name}</option>
             {/each}
+          </select>
+        </label>
+        <label class="scale">
+          <span>wave</span>
+          <select bind:value={engine.wave}>
+            <option value="sine">sine</option>
+            <option value="triangle">triangle</option>
+            <option value="square">square</option>
+            <option value="sawtooth">saw</option>
           </select>
         </label>
         <label>
@@ -98,8 +140,10 @@
   }
 
   .grain {
+    /* -8% overscan is enough for the ±3% jitter — a -50% bleed made the
+       compositor rasterize a layer 4× the viewport for nothing */
     position: fixed;
-    inset: -50%;
+    inset: -8%;
     pointer-events: none;
     z-index: 30;
     opacity: 0.12;
@@ -176,9 +220,10 @@
     gap: 1.5rem;
     padding: 0.6rem 1.2rem;
     border-radius: 999px;
-    background: rgba(11, 7, 20, 0.55);
+    /* near-opaque instead of backdrop-filter — the canvas behind repaints
+       every frame, so a blur would be recomputed every frame too */
+    background: rgba(11, 7, 20, 0.82);
     border: 1px solid rgba(242, 234, 217, 0.12);
-    backdrop-filter: blur(8px);
   }
 
   footer {

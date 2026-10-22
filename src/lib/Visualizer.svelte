@@ -9,10 +9,9 @@
   const reducedMotion =
     typeof matchMedia !== 'undefined' && matchMedia('(prefers-reduced-motion: reduce)').matches
 
-  // The whole scene renders into a reduced-resolution buffer, then blits up
-  // to the screen in one GPU-cheap drawImage. 0.9 keeps lines defined while
-  // still rasterizing ~64% fewer pixels than rendering at 1.5× DPR.
-  const RES = 0.9
+  // Render at native device resolution, capped at 1.5× — on a glow piece the
+  // step to 2× is barely visible but fills ~78% more pixels every frame.
+  const MAX_DPR = 1.5
 
   // Pre-rendered radial-gradient sprites replace shadowBlur — the single
   // biggest canvas cost. One drawImage per glow instead of a blur pass.
@@ -21,7 +20,7 @@
     const key = `${Math.round(hue / 4) * 4}`
     let sprite = glowCache.get(key)
     if (!sprite) {
-      const SIZE = 32
+      const SIZE = 64
       sprite = document.createElement('canvas')
       sprite.width = sprite.height = SIZE
       const g = sprite.getContext('2d')!
@@ -37,32 +36,45 @@
   }
 
   onMount(() => {
-    const screen = canvas.getContext('2d')!
-    const buffer = document.createElement('canvas')
-    const ctx = buffer.getContext('2d')!
+    // opaque context — the page behind is the same #0b0714, so the compositor
+    // can skip alpha-blending a fullscreen layer every vsync
+    const ctx = canvas.getContext('2d', { alpha: false })!
     let raf = 0
     let w = 0
     let h = 0
+    let dpr = 1
     let lastFrame = 0
     let nebula: CanvasGradient | null = null
+    // bounding box of the nebula gradient — outside it every pixel is
+    // transparent, so filling the whole canvas would be wasted rasterization
+    let nebX = 0
+    let nebY = 0
+    let nebW = 0
+    let nebH = 0
 
     const resize = () => {
       w = canvas.clientWidth
       h = canvas.clientHeight
-      canvas.width = w
-      canvas.height = h
-      buffer.width = Math.max(1, Math.round(w * RES))
-      buffer.height = Math.max(1, Math.round(h * RES))
-      // buffer transform maps CSS-pixel coordinates onto the small bitmap
-      ctx.setTransform(RES, 0, 0, RES, 0, 0)
-      screen.globalCompositeOperation = 'copy' // blit replaces — no clear needed
-      screen.imageSmoothingEnabled = true
-      screen.imageSmoothingQuality = 'high'
+      dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR)
+      canvas.width = Math.max(1, Math.round(w * dpr))
+      canvas.height = Math.max(1, Math.round(h * dpr))
+      // transform maps CSS-pixel coordinates onto the device-pixel bitmap,
+      // so every draw below stays in CSS units and renders razor-sharp
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
       const maxR = Math.min(w, h) * 0.46
-      nebula = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, maxR * 1.25)
+      const nebR = maxR * 1.25
+      nebX = Math.max(0, w / 2 - nebR)
+      nebY = Math.max(0, h / 2 - nebR)
+      nebW = Math.min(w, w / 2 + nebR) - nebX
+      nebH = Math.min(h, h / 2 + nebR) - nebY
+      nebula = ctx.createRadialGradient(w / 2, h / 2, 0, w / 2, h / 2, nebR)
       nebula.addColorStop(0, 'rgba(96, 70, 160, 0.05)')
       nebula.addColorStop(0.55, 'rgba(56, 40, 110, 0.03)')
       nebula.addColorStop(1, 'rgba(0, 0, 0, 0)')
+      // an opaque canvas resets to black on resize — prime it with the night
+      // color so there's no flash before the first trail fill
+      ctx.fillStyle = '#0b0714'
+      ctx.fillRect(0, 0, w, h)
     }
     resize()
     const observer = new ResizeObserver(resize)
@@ -72,7 +84,11 @@
       raf = requestAnimationFrame(draw)
       const nowMs = performance.now()
       if (nowMs - lastFrame < 15) return // cap ~60 fps on high-refresh displays
-      lastFrame = nowMs
+      // carry the remainder — snapping to the vsync tick would quantize 90 Hz
+      // displays down to 45 fps (and 144 Hz to 48), stretching the trails
+      lastFrame = nowMs - ((nowMs - lastFrame) % 15)
+      // catch monitor moves / zoom — ResizeObserver misses pure-DPR changes
+      if (Math.min(window.devicePixelRatio || 1, MAX_DPR) !== dpr) resize()
 
       const cx = w / 2
       const cy = h / 2
@@ -93,7 +109,7 @@
         const breathe = reducedMotion ? 1 : 0.85 + 0.15 * Math.sin(nowMs / 9000)
         ctx.globalAlpha = Math.min(1, breathe * (0.55 + 0.8 * engine.droneLevel()))
         ctx.fillStyle = nebula
-        ctx.fillRect(0, 0, w, h)
+        ctx.fillRect(nebX, nebY, nebW, nebH)
         ctx.globalAlpha = 1
       }
 
@@ -108,7 +124,10 @@
         // the eternal pulse sits small and steady at the center of the garden
         const alpha = ring.eternal ? 0.28 : envelope(age)
         const radius = ring.eternal ? 26 : 14 + (maxR - 14) * age
-        const pulses = Math.max(1, pattern.filter(Boolean).length)
+        // counted in place — .filter() here would allocate per ring per frame
+        let pulses = 0
+        for (let i = 0; i < pattern.length; i++) if (pattern[i]) pulses++
+        if (pulses < 1) pulses = 1
         const flash = Math.exp(-(nowMs - ring.lastHitMs) / 260)
         const spin = reducedMotion ? 0 : (nowMs / 60000) * (ring.id % 2 ? 1 : -1)
         const sprite = glowSprite(ring.hue)
@@ -153,6 +172,10 @@
         ctx.fillStyle = `hsl(${ring.hue} 40% 60% / ${alpha * 0.2})`
         ctx.fill()
 
+        // both dot styles are constant for the ring — build them once, not
+        // once per onset (fresh color strings are a CSS parse each)
+        const dotCurrent = `hsl(${ring.hue} 80% 74% / ${alpha * 0.85})`
+        const dotRest = `hsl(${ring.hue} 80% 58% / ${alpha * 0.55})`
         for (let i = 0; i < ring.steps; i++) {
           if (!pattern[i]) continue
           const angle = -Math.PI / 2 + (i / ring.steps) * Math.PI * 2 + spin
@@ -166,7 +189,7 @@
           ctx.globalAlpha = 1
           ctx.beginPath()
           ctx.arc(x, y, size, 0, Math.PI * 2)
-          ctx.fillStyle = `hsl(${ring.hue} 80% ${isCurrent ? 74 : 58}% / ${alpha * (isCurrent ? 0.85 : 0.55)})`
+          ctx.fillStyle = isCurrent ? dotCurrent : dotRest
           ctx.fill()
         }
 
@@ -174,6 +197,9 @@
         const head = -Math.PI / 2 + phase * Math.PI * 2 + spin
         const TAIL_SEGS = 12
         const tailSpan = 0.7 // radians of arc behind the head
+        // one color for the whole tail; per-segment fade rides globalAlpha —
+        // same composite, without 12 fresh color strings per ring per frame
+        ctx.strokeStyle = `hsl(${ring.hue} 80% 66% / ${alpha * 0.2})`
         for (let i = 0; i < TAIL_SEGS; i++) {
           const f = i / TAIL_SEGS
           const a0 = head - tailSpan * f
@@ -181,10 +207,11 @@
           const fade = (1 - f) ** 2
           ctx.beginPath()
           ctx.arc(cx, cy, radius, a1, a0)
-          ctx.strokeStyle = `hsl(${ring.hue} 80% 66% / ${alpha * 0.2 * fade})`
+          ctx.globalAlpha = fade
           ctx.lineWidth = 2 * fade + 0.3
           ctx.stroke()
         }
+        ctx.globalAlpha = 1
         const hx = cx + radius * Math.cos(head)
         const hy = cy + radius * Math.sin(head)
         ctx.globalAlpha = alpha * 0.7
@@ -197,9 +224,6 @@
       }
 
       ctx.globalCompositeOperation = 'source-over'
-
-      // one upscaled blit to the screen — 'copy' replaces the whole frame
-      screen.drawImage(buffer, 0, 0, w, h)
     }
     raf = requestAnimationFrame(draw)
 

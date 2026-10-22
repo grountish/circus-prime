@@ -3,6 +3,15 @@ import { euclid, rotate } from './euclid'
 import { type Ring, FADE_START, ageOf, envelope, makeRing, pulsesAt } from './ring'
 import { Tuning, type ScaleName } from './tuning'
 
+export type Waveform = 'sine' | 'triangle' | 'square' | 'sawtooth'
+
+/** loudness trim (dB) per waveform — richer spectra read much louder than a
+ * sine at the same peak, so each wave gets pulled back toward equal loudness */
+const WAVE_TRIM: Record<Waveform, number> = { sine: 0, triangle: -2, square: -8, sawtooth: -6 }
+/** base volume (dB) of each melodic voice, before the waveform trim */
+const VOICE_VOL = { keys: -5, mallet: -7 } as const
+const SHADOW_VOL = -12
+
 const RING_LIFE = 45 // shorter lives — generations turn over without crowding
 const SPAWN_EVERY = '1m' // refill an open slot every measure — no dead air
 const RETIRE_WITHIN = 12 // seconds old-key rings take to finish after a modulation
@@ -60,6 +69,7 @@ export class Engine {
   private _orbits = $state(9) // melodic rings (the eternal pulse rides on top)
   private _volume = $state(0.8)
   private _dronePeak = $state(0.2) // drone gain at the middle of a key cycle
+  private _wave: Waveform = $state('sine') // melodic voices' oscillator shape
 
   constructor() {
     this.tuning.setScale('mixolydian')
@@ -88,6 +98,27 @@ export class Engine {
     this.tuning.setScale(name)
     this.key = this.tuning.currentKeyName()
     if (name !== 'auto' && this.started) this.retireMelodicRings(Tone.now())
+  }
+
+  get wave(): Waveform {
+    return this._wave
+  }
+
+  /** Oscillator shape of the melodic voices (keys, mallet, canon shadows).
+   * Membrane, pulse and drone keep their sine — the bed holds its identity
+   * while the figures change color. Applies live to running voices. */
+  set wave(value: Waveform) {
+    this._wave = value
+    const trim = WAVE_TRIM[value]
+    for (const { ring, synth, shadow } of this.voices.values()) {
+      if (ring.eternal || ring.voice === 'membrane') continue
+      ;(synth as Tone.Synth).oscillator.type = value
+      synth.volume.value = VOICE_VOL[ring.voice] + trim
+      if (shadow) {
+        shadow.oscillator.type = value
+        shadow.volume.value = SHADOW_VOL + trim
+      }
+    }
   }
 
   get modulateEvery(): number {
@@ -403,9 +434,9 @@ export class Engine {
       ring.voice === 'membrane'
         ? undefined
         : new Tone.Synth({
-            oscillator: { type: 'sine' },
+            oscillator: { type: this._wave },
             envelope: { attack: 0.035, decay: 0.7, sustain: 0, release: 0.6 },
-            volume: -12,
+            volume: SHADOW_VOL + WAVE_TRIM[this._wave],
           }).connect(gain)
 
     const loop = new Tone.Loop((time) => {
@@ -464,18 +495,18 @@ export class Engine {
           volume: -5,
         })
       case 'keys':
-        // soft sine keys — longer tail than the mallet, fills the mid register
+        // soft keys — longer tail than the mallet, fills the mid register
         return new Tone.Synth({
-          oscillator: { type: 'sine' },
+          oscillator: { type: this._wave },
           envelope: { attack: 0.045, decay: 1.6, sustain: 0, release: 1.2 },
-          volume: -5,
+          volume: VOICE_VOL.keys + WAVE_TRIM[this._wave],
         })
       case 'mallet':
-        // pure sine music-box / kalimba — zero metallic overtones
+        // music-box / kalimba register, an octave above the keys
         return new Tone.Synth({
-          oscillator: { type: 'sine' },
+          oscillator: { type: this._wave },
           envelope: { attack: 0.03, decay: 0.9, sustain: 0, release: 0.8 },
-          volume: -7,
+          volume: VOICE_VOL.mallet + WAVE_TRIM[this._wave],
         })
     }
   }
